@@ -1,0 +1,11 @@
+# Core (always needed)
+sqlalchemy
+
+# SQLite driver is built into Python — no extra package needed.
+
+# MySQL driver  (install only if DB_TYPE = "mysql")
+pymysql
+cryptography
+
+# PostgreSQL driver  (install only if DB_TYPE = "postgresql")
+# psycopg2-binary
