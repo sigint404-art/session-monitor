@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-setup.py  -  First time setup wizard.
+setup.py  -  First time setup wizard for pyodbc configuration.
 Run this ONCE on any PC before starting the monitor.
-It figures out all paths automatically and writes credentials.py for you.
+Configures ODBC connection details and network share access.
 
 Usage:
     python setup.py
@@ -11,6 +11,7 @@ Usage:
 import os
 import sys
 import subprocess
+import pyodbc
 
 
 # ─── Colours ─────────────────────────────────────────────────────────────────
@@ -59,26 +60,28 @@ def banner():
     clear()
     print()
     print(c(CYAN, "  ╔══════════════════════════════════════════════╗"))
-    print(c(CYAN, "  ║") + c(BOLD + WHITE, "    SESSION MONITOR - First Time Setup      ") + c(CYAN, "║"))
-    print(c(CYAN, "  ║") + c(DIM,          "    Run this once on every new PC           ") + c(CYAN, "║"))
+    print(c(CYAN, "  ║") + c(BOLD + WHITE, "    SESSION MONITOR - ODBC Setup             ") + c(CYAN, "║"))
+    print(c(CYAN, "  ║") + c(DIM,          "    Configure your database connection       ") + c(CYAN, "║"))
     print(c(CYAN, "  ╚══════════════════════════════════════════════╝"))
     print()
 
 
-# ─── Auto-detect defaults ────────────────────────────────────────────────────
+# ─── ODBC driver detection ────────────────────────────────────────────────────
 
-def get_default_db_path():
-    """Put sessions.db in the same folder as this script."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(script_dir, "sessions.db")
-
-def get_default_ip():
-    """Try to guess the server IP from existing credentials.py if present."""
+def get_installed_drivers():
+    """Return list of installed ODBC drivers."""
     try:
-        import credentials as cfg
-        return cfg.MYSQL_HOST if cfg.DB_TYPE == "mysql" else None
+        return sorted(pyodbc.drivers())
     except Exception:
-        return None
+        return []
+
+def get_default_driver():
+    """Try to find the most common SQL Server driver."""
+    drivers = get_installed_drivers()
+    for preferred in ["ODBC Driver 17 for SQL Server", "ODBC Driver 18 for SQL Server", "SQL Server"]:
+        if preferred in drivers:
+            return preferred
+    return drivers[0] if drivers else None
 
 
 # ─── Validation helpers ───────────────────────────────────────────────────────
@@ -92,8 +95,32 @@ def validate_ip(ip):
     except ValueError:
         return False
 
+def test_odbc_connection(driver, server, database, user, password, trusted):
+    """Test ODBC connection with given parameters."""
+    try:
+        if trusted:
+            conn_str = (
+                f"Driver={{{driver}}};"
+                f"Server={server};"
+                f"Database={database};"
+                f"Trusted_Connection=yes;"
+            )
+        else:
+            conn_str = (
+                f"Driver={{{driver}}};"
+                f"Server={server};"
+                f"Database={database};"
+                f"UID={user};"
+                f"PWD={password};"
+            )
+        conn = pyodbc.connect(conn_str, timeout=5)
+        conn.close()
+        return True, "Connection successful"
+    except Exception as e:
+        return False, str(e)
+
 def test_share_access(path):
-    """Return True if we can list the network share."""
+    """Return True if we can access the network share."""
     try:
         return os.path.exists(path)
     except Exception:
@@ -135,38 +162,27 @@ def write_credentials(config: dict):
 #  Run setup.py again to reconfigure.
 # =============================================================
 
-DB_TYPE = "sqlite"
-
-# SQLite path (this PC)
-SQLITE_PATH = r"{config['sqlite_path']}"
-
-# MySQL (not used unless you change DB_TYPE)
-MYSQL_HOST     = "{config.get('server_ip', '192.168.1.100')}"
-MYSQL_PORT     = 3306
-MYSQL_DB       = "sessions"
-MYSQL_USER     = "{config.get('db_user', 'admin')}"
-MYSQL_PASSWORD = "{config.get('db_password', '')}"
-
-# PostgreSQL (not used unless you change DB_TYPE)
-PG_HOST        = "{config.get('server_ip', '192.168.1.100')}"
-PG_PORT        = 5432
-PG_DB          = "sessions"
-PG_USER        = "admin"
-PG_PASSWORD    = ""
+# ODBC Configuration
+ODBC_DRIVER = "{config['odbc_driver']}"
+ODBC_SERVER = "{config['server']}"
+ODBC_DATABASE = "{config['database']}"
+ODBC_USER = "{config['user']}"
+ODBC_PASSWORD = "{config['password']}"
+ODBC_TRUSTED_CONNECTION = {str(config['trusted']).lower()}
 
 # Folder to watch
 SESSIONS_FOLDER = r"\\\\{config['server_ip']}\\sessions"
 
 # Behaviour
 POLL_INTERVAL = {config.get('poll_interval', 5)}
-DEFAULT_SITE  = ""
+DEFAULT_SITE = ""
 '''
     with open(out_path, "w") as f:
         f.write(lines)
     return out_path
 
 
-# ─── Create DB ───────────────────────────────────────────────────────────────
+# ─── Create DB ─────────────────────────────────────────────────────────────
 
 def create_database():
     """Import db (which reads the freshly written credentials.py) and init."""
@@ -185,76 +201,139 @@ def create_database():
 def run():
     banner()
 
-    # ── Section 1: Server IP ────────────────────────────────
+    # ── Section 0: ODBC Driver selection ─────────────────────
+    print(c(BOLD, "  0 · ODBC Driver"))
+    print(c(DIM,  "  " + "─" * 44))
+    print()
+
+    drivers = get_installed_drivers()
+    if not drivers:
+        error("No ODBC drivers found on this system.")
+        error("Please install an ODBC driver (e.g., 'ODBC Driver 17 for SQL Server')")
+        sys.exit(1)
+
+    info(f"Found {len(drivers)} ODBC driver(s):")
+    for i, driver in enumerate(drivers, 1):
+        print(f"    {i}. {driver}")
+    print()
+
+    default_driver = get_default_driver()
+    driver_choice = ask(
+        f"Select ODBC driver (number or name)",
+        default=default_driver or drivers[0]
+    )
+
+    # Resolve driver selection
+    if driver_choice.isdigit():
+        idx = int(driver_choice) - 1
+        if 0 <= idx < len(drivers):
+            selected_driver = drivers[idx]
+        else:
+            error(f"Invalid selection: {driver_choice}")
+            sys.exit(1)
+    elif driver_choice in drivers:
+        selected_driver = driver_choice
+    else:
+        error(f"Driver not found: {driver_choice}")
+        sys.exit(1)
+
+    success(f"Selected: {selected_driver}")
+    print()
+
+    # ── Section 1: Server details ────────────────────────────
     print(c(BOLD, "  1 · Server details"))
     print(c(DIM,  "  " + "─" * 44))
     print()
 
     while True:
-        ip = ask("What is the server IP address?", default=get_default_ip())
-        if not ip:
-            error("IP address is required.")
-            continue
-        if not validate_ip(ip):
-            error(f"'{ip}' doesn't look like a valid IP. Example: 192.168.1.105")
+        server = ask("SQL Server address (e.g., 192.168.1.105 or localhost)", default="localhost")
+        if not server:
+            error("Server address is required.")
             continue
         break
 
-    share_path = f"\\\\{ip}\\sessions"
+    while True:
+        database = ask("Database name", default="sessions")
+        if not database:
+            error("Database name is required.")
+            continue
+        break
+
+    print()
+
+    # ── Section 2: Authentication ───────────────────────────
+    print(c(BOLD, "  2 · Authentication"))
+    print(c(DIM,  "  " + "─" * 44))
+    print()
+
+    auth_choice = ask(
+        "Use Windows Authentication (Trusted Connection)? (y/n)",
+        default="y"
+    ).lower()
+    use_trusted = auth_choice in ["y", "yes", "true"]
+
+    if use_trusted:
+        user = ""
+        password = ""
+        info("Will use Windows Authentication")
+    else:
+        user = ask("SQL Server username", default="admin")
+        password = ask("SQL Server password (or press Enter to skip)", default="")
+
+    print()
+
+    # ── Section 3: Test connection ───────────────────────────
+    print(c(BOLD, "  3 · Test connection"))
+    print(c(DIM,  "  " + "─" * 44))
+    print()
+
+    info("Testing ODBC connection...")
+    ok, msg = test_odbc_connection(selected_driver, server, database, user, password, use_trusted)
+    if ok:
+        success("Connection successful!")
+    else:
+        warn(f"Connection failed: {msg}")
+        proceed = ask("Continue anyway? (y/n)", default="y").lower()
+        if proceed not in ["y", "yes"]:
+            sys.exit(1)
+
+    print()
+
+    # ── Section 4: Network share ─────────────────────────────
+    print(c(BOLD, "  4 · Network share access"))
+    print(c(DIM,  "  " + "─" * 44))
+    print()
+
+    server_ip = ask("Server IP for sessions folder", default="192.168.1.105")
+    share_path = f"\\\\{server_ip}\\sessions"
     info(f"Will watch: {share_path}")
     print()
 
-    # ── Section 2: Share credentials ────────────────────────
-    print(c(BOLD, "  2 · Network share access"))
-    print(c(DIM,  "  " + "─" * 44))
-    print()
-    info("Testing access to the share...")
-    print()
-
     if test_share_access(share_path):
-        success(f"Share is accessible - no credentials needed.")
-        print()
-        username = None
-        password = None
+        success(f"Share is accessible")
+        share_user = None
+        share_password = None
     else:
         warn("Cannot access share yet. Enter credentials to connect.")
         print()
-        username = ask("Username (or press Enter to skip)", default=None)
-        password = ask("Password (or press Enter to skip)", default=None)
+        share_user = ask("Username (or press Enter to skip)", default=None)
+        share_password = ask("Password (or press Enter to skip)", default=None)
 
-        if username or password:
+        if share_user or share_password:
             info("Connecting to share...")
-            ok, msg = try_net_use(ip, username, password)
+            ok, msg = try_net_use(server_ip, share_user, share_password)
             if ok:
                 success("Connected to share successfully.")
             else:
                 warn(f"Could not connect automatically: {msg}")
-                warn("The monitor may still work if the share is accessible.")
-            print()
+                warn("The monitor may still work if the share is accessible manually.")
         else:
             warn("No credentials provided - make sure the share is accessible manually.")
-            print()
 
-    # ── Section 3: Database path ─────────────────────────────
-    print(c(BOLD, "  3 · Database location on this PC"))
-    print(c(DIM,  "  " + "─" * 44))
     print()
 
-    default_db = get_default_db_path()
-    db_path    = ask("Where should sessions.db be saved?", default=default_db)
-
-    # Make sure parent folder exists
-    parent = os.path.dirname(os.path.abspath(db_path))
-    if not os.path.exists(parent):
-        try:
-            os.makedirs(parent, exist_ok=True)
-            info(f"Created folder: {parent}")
-        except Exception as e:
-            error(f"Could not create folder: {e}")
-            sys.exit(1)
-
-    # ── Section 4: Poll interval ─────────────────────────────
-    print(c(BOLD, "  4 · Scan frequency"))
+    # ── Section 5: Poll interval ─────────────────────────────
+    print(c(BOLD, "  5 · Scan frequency"))
     print(c(DIM,  "  " + "─" * 44))
     print()
 
@@ -269,15 +348,18 @@ def run():
             error("Please enter a number (e.g. 5)")
 
     # ── Write credentials.py ─────────────────────────────────
-    print(c(BOLD, "  5 · Writing configuration"))
+    print(c(BOLD, "  6 · Writing configuration"))
     print(c(DIM,  "  " + "─" * 44))
     print()
 
     config = {
-        "server_ip":     ip,
-        "sqlite_path":   os.path.abspath(db_path),
-        "db_user":       username or "admin",
-        "db_password":   password or "",
+        "odbc_driver":   selected_driver,
+        "server":        server,
+        "database":      database,
+        "user":          user,
+        "password":      password,
+        "trusted":       use_trusted,
+        "server_ip":     server_ip,
         "poll_interval": poll,
     }
 
@@ -292,8 +374,7 @@ def run():
     # ── Create DB ────────────────────────────────────────────
     try:
         create_database()
-        success(f"Database created")
-        info(f"  → {os.path.abspath(db_path)}")
+        success(f"Database tables created")
     except Exception as e:
         error(f"Could not create database: {e}")
         sys.exit(1)
@@ -303,9 +384,10 @@ def run():
     print(c(CYAN, "  ╔══════════════════════════════════════════════╗"))
     print(c(CYAN, "  ║") + c(GREEN + BOLD, "    ✔  Setup complete!                       ") + c(CYAN, "║"))
     print(c(CYAN, "  ╠══════════════════════════════════════════════╣"))
-    print(c(CYAN, "  ║") + f"    Server  : {c(WHITE, ip):<51}" + c(CYAN, "║"))
-    print(c(CYAN, "  ║") + f"    Watching: {c(WHITE, share_path):<51}" + c(CYAN, "║"))
-    print(c(CYAN, "  ║") + f"    Database: {c(WHITE, os.path.basename(db_path)):<51}" + c(CYAN, "║"))
+    print(c(CYAN, "  ║") + f"    Driver  : {c(WHITE, selected_driver[:41]):<41}" + c(CYAN, "║"))
+    print(c(CYAN, "  ║") + f"    Server  : {c(WHITE, server[:51]):<51}" + c(CYAN, "║"))
+    print(c(CYAN, "  ║") + f"    Database: {c(WHITE, database[:51]):<51}" + c(CYAN, "║"))
+    print(c(CYAN, "  ║") + f"    Watching: {c(WHITE, share_path[:51]):<51}" + c(CYAN, "║"))
     print(c(CYAN, "  ║") + f"    Polling : {c(WHITE, f'every {poll}s'):<51}" + c(CYAN, "║"))
     print(c(CYAN, "  ╠══════════════════════════════════════════════╣"))
     print(c(CYAN, "  ║") + c(DIM, "    Now run:  python monitor.py              ") + c(CYAN, "║"))
