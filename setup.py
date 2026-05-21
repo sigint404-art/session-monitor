@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-setup.py  -  First time setup wizard for pyodbc configuration.
+setup.py  -  First time setup wizard.
 Run this ONCE on any PC before starting the monitor.
-Configures ODBC connection details and network share access.
+It figures out all paths automatically and writes credentials.py for you.
 
 Usage:
     python setup.py
@@ -41,6 +41,13 @@ def ask(prompt, default=None):
     print()
     return val if val else default
 
+def ask_yes_no(prompt, default="n"):
+    """Ask a yes/no question."""
+    display = f"  {c(CYAN, '?')} {prompt} ({default.lower()}/{'n' if default.lower() == 'y' else 'y'}) "
+    val = input(display).strip().lower()
+    print()
+    return val in ("y", "yes") if val else default.lower() in ("y", "yes")
+
 def success(msg):
     print(f"  {c(GREEN, '✔')}  {msg}")
 
@@ -60,67 +67,35 @@ def banner():
     clear()
     print()
     print(c(CYAN, "  ╔══════════════════════════════════════════════╗"))
-    print(c(CYAN, "  ║") + c(BOLD + WHITE, "    SESSION MONITOR - ODBC Setup             ") + c(CYAN, "║"))
-    print(c(CYAN, "  ║") + c(DIM,          "    Configure your database connection       ") + c(CYAN, "║"))
+    print(c(CYAN, "  ║") + c(BOLD + WHITE, "    SESSION MONITOR - First Time Setup      ") + c(CYAN, "║"))
+    print(c(CYAN, "  ║") + c(DIM,          "    Run this once on every new PC           ") + c(CYAN, "║"))
     print(c(CYAN, "  ╚══════════════════════════════════════════════╝"))
     print()
 
 
-# ─── ODBC driver detection ────────────────────────────────────────────────────
+# ─── Auto-detect ODBC drivers ─────────────────────────────────────────────────
 
-def get_installed_drivers():
-    """Return list of installed ODBC drivers."""
+def get_available_drivers():
+    """Get list of available ODBC drivers on the system."""
     try:
-        return sorted(pyodbc.drivers())
+        drivers = pyodbc.drivers()
+        return [d for d in drivers if 'SQL Server' in d or 'ODBC Driver' in d]
     except Exception:
         return []
 
-def get_default_driver():
-    """Try to find the most common SQL Server driver."""
-    drivers = get_installed_drivers()
-    for preferred in ["ODBC Driver 17 for SQL Server", "ODBC Driver 18 for SQL Server", "SQL Server"]:
-        if preferred in drivers:
-            return preferred
-    return drivers[0] if drivers else None
+def get_default_server():
+    """Try to guess the server from existing credentials.py if present."""
+    try:
+        import credentials as cfg
+        return cfg.ODBC_SERVER if hasattr(cfg, 'ODBC_SERVER') else None
+    except Exception:
+        return None
 
 
 # ─── Validation helpers ───────────────────────────────────────────────────────
 
-def validate_ip(ip):
-    parts = ip.split(".")
-    if len(parts) != 4:
-        return False
-    try:
-        return all(0 <= int(p) <= 255 for p in parts)
-    except ValueError:
-        return False
-
-def test_odbc_connection(driver, server, database, user, password, trusted):
-    """Test ODBC connection with given parameters."""
-    try:
-        if trusted:
-            conn_str = (
-                f"Driver={{{driver}}};"
-                f"Server={server};"
-                f"Database={database};"
-                f"Trusted_Connection=yes;"
-            )
-        else:
-            conn_str = (
-                f"Driver={{{driver}}};"
-                f"Server={server};"
-                f"Database={database};"
-                f"UID={user};"
-                f"PWD={password};"
-            )
-        conn = pyodbc.connect(conn_str, timeout=5)
-        conn.close()
-        return True, "Connection successful"
-    except Exception as e:
-        return False, str(e)
-
 def test_share_access(path):
-    """Return True if we can access the network share."""
+    """Return True if we can list the network share."""
     try:
         return os.path.exists(path)
     except Exception:
@@ -149,6 +124,30 @@ def try_net_use(ip, username, password):
     except Exception as e:
         return False, str(e)
 
+def test_odbc_connection(driver, server, database, user, password, trusted):
+    """Test ODBC connection."""
+    try:
+        if trusted:
+            conn_str = (
+                f"Driver={{{driver}}};"
+                f"Server={server};"
+                f"Database={database};"
+                f"Trusted_Connection=yes;"
+            )
+        else:
+            conn_str = (
+                f"Driver={{{driver}}};"
+                f"Server={server};"
+                f"Database={database};"
+                f"UID={user};"
+                f"PWD={password};"
+            )
+        conn = pyodbc.connect(conn_str, timeout=10)
+        conn.close()
+        return True, "Connected successfully"
+    except Exception as e:
+        return False, str(e)
+
 
 # ─── Write credentials.py ────────────────────────────────────────────────────
 
@@ -171,7 +170,7 @@ ODBC_PASSWORD = "{config['password']}"
 ODBC_TRUSTED_CONNECTION = {str(config['trusted']).lower()}
 
 # Folder to watch
-SESSIONS_FOLDER = r"\\\\{config['server_ip']}\\sessions"
+SESSIONS_FOLDER = r"\\\\{config['server']}\\sessions"
 
 # Behaviour
 POLL_INTERVAL = {config.get('poll_interval', 5)}
@@ -182,7 +181,7 @@ DEFAULT_SITE = ""
     return out_path
 
 
-# ─── Create DB ─────────────────────────────────────────────────────────────
+# ─── Create DB ─────────────────────────────────────────────────────────────────
 
 def create_database():
     """Import db (which reads the freshly written credentials.py) and init."""
@@ -196,144 +195,128 @@ def create_database():
     database.init_db()
 
 
-# ─── Main wizard ─────────────────────────────────────────────────────────────
+# ─── Main wizard ───────────────────────────────────────────────────────────────
 
 def run():
     banner()
 
-    # ── Section 0: ODBC Driver selection ─────────────────────
-    print(c(BOLD, "  0 · ODBC Driver"))
+    # ── Section 1: ODBC Driver ──────────────────────────────
+    print(c(BOLD, "  1 · ODBC Driver"))
     print(c(DIM,  "  " + "─" * 44))
     print()
 
-    drivers = get_installed_drivers()
-    if not drivers:
-        error("No ODBC drivers found on this system.")
-        error("Please install an ODBC driver (e.g., 'ODBC Driver 17 for SQL Server')")
+    available_drivers = get_available_drivers()
+    
+    if not available_drivers:
+        error("No SQL Server ODBC drivers found on this system.")
+        error("Please install 'ODBC Driver 17 for SQL Server' or similar.")
         sys.exit(1)
 
-    info(f"Found {len(drivers)} ODBC driver(s):")
-    for i, driver in enumerate(drivers, 1):
+    info("Available ODBC drivers:")
+    for i, driver in enumerate(available_drivers, 1):
         print(f"    {i}. {driver}")
     print()
 
-    default_driver = get_default_driver()
-    driver_choice = ask(
-        f"Select ODBC driver (number or name)",
-        default=default_driver or drivers[0]
-    )
+    while True:
+        choice = ask(f"Select driver (1-{len(available_drivers)})", default="1")
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(available_drivers):
+                odbc_driver = available_drivers[idx]
+                break
+            else:
+                error(f"Please enter a number between 1 and {len(available_drivers)}")
+        except ValueError:
+            error("Please enter a valid number")
 
-    # Resolve driver selection
-    if driver_choice.isdigit():
-        idx = int(driver_choice) - 1
-        if 0 <= idx < len(drivers):
-            selected_driver = drivers[idx]
-        else:
-            error(f"Invalid selection: {driver_choice}")
-            sys.exit(1)
-    elif driver_choice in drivers:
-        selected_driver = driver_choice
-    else:
-        error(f"Driver not found: {driver_choice}")
-        sys.exit(1)
-
-    success(f"Selected: {selected_driver}")
     print()
 
-    # ── Section 1: Server details ────────────────────────────
-    print(c(BOLD, "  1 · Server details"))
+    # ── Section 2: Server details ────────────────────────
+    print(c(BOLD, "  2 · Server details"))
     print(c(DIM,  "  " + "─" * 44))
     print()
 
     while True:
-        server = ask("SQL Server address (e.g., 192.168.1.105 or localhost)", default="localhost")
+        server = ask("SQL Server address (IP or hostname)", default=get_default_server())
         if not server:
             error("Server address is required.")
             continue
         break
 
-    while True:
-        database = ask("Database name", default="sessions")
-        if not database:
-            error("Database name is required.")
-            continue
-        break
-
+    database = ask("Database name", default="sessions")
     print()
 
-    # ── Section 2: Authentication ───────────────────────────
-    print(c(BOLD, "  2 · Authentication"))
+    # ── Section 3: Authentication ───────────────────────
+    print(c(BOLD, "  3 · Authentication"))
     print(c(DIM,  "  " + "─" * 44))
     print()
 
-    auth_choice = ask(
-        "Use Windows Authentication (Trusted Connection)? (y/n)",
-        default="y"
-    ).lower()
-    use_trusted = auth_choice in ["y", "yes", "true"]
-
-    if use_trusted:
-        user = ""
-        password = ""
-        info("Will use Windows Authentication")
+    auth_type = ask("Use Windows Authentication? (y/n)", default="y")
+    trusted_connection = auth_type.lower() in ("y", "yes")
+    
+    if trusted_connection:
+        info("Using Windows Authentication (Trusted Connection)")
+        db_user = ""
+        db_password = ""
     else:
-        user = ask("SQL Server username", default="admin")
-        password = ask("SQL Server password (or press Enter to skip)", default="")
-
+        db_user = ask("Database username", default="sa")
+        db_password = ask("Database password", default="")
+    
     print()
 
-    # ── Section 3: Test connection ───────────────────────────
-    print(c(BOLD, "  3 · Test connection"))
+    # ── Section 4: Test connection ───────────────────────
+    print(c(BOLD, "  4 · Test connection"))
     print(c(DIM,  "  " + "─" * 44))
     print()
-
+    
     info("Testing ODBC connection...")
-    ok, msg = test_odbc_connection(selected_driver, server, database, user, password, use_trusted)
+    ok, msg = test_odbc_connection(odbc_driver, server, database, db_user, db_password, trusted_connection)
+    
     if ok:
-        success("Connection successful!")
+        success("ODBC connection successful!")
     else:
         warn(f"Connection failed: {msg}")
-        proceed = ask("Continue anyway? (y/n)", default="y").lower()
-        if proceed not in ["y", "yes"]:
-            sys.exit(1)
-
+        if not ask_yes_no("Continue anyway?", default="n"):
+            info("Setup cancelled.")
+            sys.exit(0)
+    
     print()
 
-    # ── Section 4: Network share ─────────────────────────────
-    print(c(BOLD, "  4 · Network share access"))
+    # ── Section 5: Network share access ──────────────────
+    print(c(BOLD, "  5 · Network share access"))
     print(c(DIM,  "  " + "─" * 44))
     print()
-
-    server_ip = ask("Server IP for sessions folder", default="192.168.1.105")
-    share_path = f"\\\\{server_ip}\\sessions"
-    info(f"Will watch: {share_path}")
+    info("Testing access to the share...")
     print()
 
+    share_path = f"\\\\{server}\\sessions"
+    
     if test_share_access(share_path):
-        success(f"Share is accessible")
-        share_user = None
+        success(f"Share is accessible - no credentials needed.")
+        print()
+        share_username = None
         share_password = None
     else:
         warn("Cannot access share yet. Enter credentials to connect.")
         print()
-        share_user = ask("Username (or press Enter to skip)", default=None)
+        share_username = ask("Username (or press Enter to skip)", default=None)
         share_password = ask("Password (or press Enter to skip)", default=None)
 
-        if share_user or share_password:
+        if share_username or share_password:
             info("Connecting to share...")
-            ok, msg = try_net_use(server_ip, share_user, share_password)
+            ok, msg = try_net_use(server, share_username, share_password)
             if ok:
                 success("Connected to share successfully.")
             else:
                 warn(f"Could not connect automatically: {msg}")
-                warn("The monitor may still work if the share is accessible manually.")
+                warn("The monitor may still work if the share is accessible.")
+            print()
         else:
             warn("No credentials provided - make sure the share is accessible manually.")
+            print()
 
-    print()
-
-    # ── Section 5: Poll interval ─────────────────────────────
-    print(c(BOLD, "  5 · Scan frequency"))
+    # ── Section 6: Poll interval ─────────────────────────
+    print(c(BOLD, "  6 · Scan frequency"))
     print(c(DIM,  "  " + "─" * 44))
     print()
 
@@ -348,18 +331,17 @@ def run():
             error("Please enter a number (e.g. 5)")
 
     # ── Write credentials.py ─────────────────────────────────
-    print(c(BOLD, "  6 · Writing configuration"))
+    print(c(BOLD, "  7 · Writing configuration"))
     print(c(DIM,  "  " + "─" * 44))
     print()
 
     config = {
-        "odbc_driver":   selected_driver,
-        "server":        server,
-        "database":      database,
-        "user":          user,
-        "password":      password,
-        "trusted":       use_trusted,
-        "server_ip":     server_ip,
+        "odbc_driver":  odbc_driver,
+        "server":       server,
+        "database":     database,
+        "user":         db_user,
+        "password":     db_password,
+        "trusted":      trusted_connection,
         "poll_interval": poll,
     }
 
@@ -374,9 +356,9 @@ def run():
     # ── Create DB ────────────────────────────────────────────
     try:
         create_database()
-        success(f"Database tables created")
+        success(f"Database initialized")
     except Exception as e:
-        error(f"Could not create database: {e}")
+        error(f"Could not initialize database: {e}")
         sys.exit(1)
 
     # ── Done ─────────────────────────────────────────────────
@@ -384,10 +366,10 @@ def run():
     print(c(CYAN, "  ╔══════════════════════════════════════════════╗"))
     print(c(CYAN, "  ║") + c(GREEN + BOLD, "    ✔  Setup complete!                       ") + c(CYAN, "║"))
     print(c(CYAN, "  ╠══════════════════════════════════════════════╣"))
-    print(c(CYAN, "  ║") + f"    Driver  : {c(WHITE, selected_driver[:41]):<41}" + c(CYAN, "║"))
-    print(c(CYAN, "  ║") + f"    Server  : {c(WHITE, server[:51]):<51}" + c(CYAN, "║"))
-    print(c(CYAN, "  ║") + f"    Database: {c(WHITE, database[:51]):<51}" + c(CYAN, "║"))
-    print(c(CYAN, "  ║") + f"    Watching: {c(WHITE, share_path[:51]):<51}" + c(CYAN, "║"))
+    print(c(CYAN, "  ║") + f"    Driver  : {c(WHITE, odbc_driver):<51}" + c(CYAN, "║"))
+    print(c(CYAN, "  ║") + f"    Server  : {c(WHITE, server):<51}" + c(CYAN, "║"))
+    print(c(CYAN, "  ║") + f"    Database: {c(WHITE, database):<51}" + c(CYAN, "║"))
+    print(c(CYAN, "  ║") + f"    Watching: {c(WHITE, share_path):<51}" + c(CYAN, "║"))
     print(c(CYAN, "  ║") + f"    Polling : {c(WHITE, f'every {poll}s'):<51}" + c(CYAN, "║"))
     print(c(CYAN, "  ╠══════════════════════════════════════════════╣"))
     print(c(CYAN, "  ║") + c(DIM, "    Now run:  python monitor.py              ") + c(CYAN, "║"))
